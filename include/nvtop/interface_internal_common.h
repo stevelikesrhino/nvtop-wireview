@@ -73,6 +73,7 @@ struct device_window {
   WINDOW *shader_cores;
   WINDOW *l2_cache_size;
   WINDOW *exec_engines;
+  WINDOW *power_rails;
   bool enc_was_visible;
   bool dec_was_visible;
   nvtop_time last_decode_seen;
