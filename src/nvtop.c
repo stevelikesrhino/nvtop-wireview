@@ -24,6 +24,7 @@
 #include "nvtop/interface.h"
 #include "nvtop/interface_common.h"
 #include "nvtop/interface_options.h"
+#include "nvtop/power_rails.h"
 #include "nvtop/time.h"
 #include "nvtop/version.h"
 
@@ -212,6 +213,14 @@ int main(int argc, char **argv) {
     perror("Impossible to set signal handler for SIGQUIT: ");
     exit(EXIT_FAILURE);
   }
+  if (sigaction(SIGTERM, &siga, NULL) != 0) {
+    perror("Impossible to set signal handler for SIGTERM: ");
+    exit(EXIT_FAILURE);
+  }
+  if (sigaction(SIGHUP, &siga, NULL) != 0) {
+    perror("Impossible to set signal handler for SIGHUP: ");
+    exit(EXIT_FAILURE);
+  }
   siga.sa_handler = resize_handler;
   if (sigaction(SIGWINCH, &siga, NULL) != 0) {
     perror("Impossible to set signal handler for SIGWINCH: ");
@@ -232,6 +241,8 @@ int main(int argc, char **argv) {
     fprintf(stdout, "No GPU to monitor.\n");
     return EXIT_SUCCESS;
   }
+
+  bool power_rails_found = power_rails_init();
 
   if (show_snapshot || loop_snapshot) {
     gpuinfo_populate_static_infos(&monitoredGpus);
@@ -255,6 +266,7 @@ int main(int argc, char **argv) {
       sleep(sec > 0 ? sec : 1);
 #endif
       gpuinfo_refresh_dynamic_info(&monitoredGpus);
+      power_rails_refresh();
       gpuinfo_refresh_processes(&monitoredGpus);
       gpuinfo_utilisation_rate(&monitoredGpus);
       gpuinfo_fix_dynamic_info_from_process_info(&monitoredGpus);
@@ -262,6 +274,7 @@ int main(int argc, char **argv) {
     } while (loop_snapshot && !signal_exit);
 
     gpuinfo_shutdown_info_extraction(&monitoredGpus);
+    power_rails_shutdown();
     return EXIT_SUCCESS;
   }
 
@@ -271,6 +284,11 @@ int main(int argc, char **argv) {
 
   nvtop_interface_option allDevicesOptions;
   alloc_interface_options_internals(custom_config_file_path, allDevCount, &monitoredGpus, &allDevicesOptions);
+  if (power_rails_found && allDevCount == 1) {
+    struct gpu_info *only_gpu = list_first_entry(&monitoredGpus, struct gpu_info, list);
+    allDevicesOptions.show_power_rails = true;
+    snprintf(allDevicesOptions.power_rails_pdev, sizeof(allDevicesOptions.power_rails_pdev), "%s", only_gpu->pdev);
+  }
   load_interface_options_from_config_file(allDevCount, &allDevicesOptions);
   for (unsigned i = 0; i < allDevCount; ++i) {
     // Nothing specified in the file
@@ -337,6 +355,7 @@ int main(int argc, char **argv) {
     interface_check_monitored_gpu_change(&interface, allDevCount, &numMonitoredGpus, &monitoredGpus, &nonMonitoredGpus);
     if (time_slept >= interface_update_interval(interface)) {
       gpuinfo_refresh_dynamic_info(&monitoredGpus);
+      power_rails_refresh();
       if (!interface_freeze_processes(interface)) {
         gpuinfo_refresh_processes(&monitoredGpus);
         gpuinfo_utilisation_rate(&monitoredGpus);
@@ -419,6 +438,7 @@ int main(int argc, char **argv) {
 
   clean_ncurses(interface);
   gpuinfo_shutdown_info_extraction(&monitoredGpus);
+  power_rails_shutdown();
 
   return EXIT_SUCCESS;
 }

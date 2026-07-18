@@ -27,6 +27,7 @@
 extern "C" {
 #include "nvtop/interface.h"
 #include "nvtop/interface_layout_selection.h"
+#include "nvtop/power_rails.h"
 }
 
 static std::ostream &operator<<(std::ostream &os, const struct window_position &win) {
@@ -150,9 +151,121 @@ bool test_with_terminal_size(unsigned device_count, unsigned header_rows, unsign
   return check_layout(screen, dev_positions, plot_positions, process_position, setup_position);
 }
 
+void write_wireview_le16(uint8_t *frame, unsigned offset, uint16_t value) {
+  frame[offset] = value & 0xff;
+  frame[offset + 1] = value >> 8;
+}
+
+void write_wireview_le32(uint8_t *frame, unsigned offset, uint32_t value) {
+  frame[offset] = value & 0xff;
+  frame[offset + 1] = (value >> 8) & 0xff;
+  frame[offset + 2] = (value >> 16) & 0xff;
+  frame[offset + 3] = value >> 24;
+}
+
+void make_valid_wireview_frame(uint8_t *frame) {
+  std::fill(frame, frame + 100, 0);
+  write_wireview_le16(frame, 0, 405);
+  frame[10] = 35;
+  for (unsigned rail = 0; rail < 6; ++rail) {
+    unsigned offset = 12 + rail * 12;
+    write_wireview_le16(frame, offset, 12000 + rail);
+    write_wireview_le32(frame, offset + 4, 1000 + rail);
+    write_wireview_le32(frame, offset + 8, 12000 + rail);
+  }
+  write_wireview_le32(frame, 84, 72015);
+  write_wireview_le32(frame, 88, 6015);
+  write_wireview_le16(frame, 92, 12002);
+  write_wireview_le16(frame, 96, 0x20);
+}
+
 } // namespace
 
 TEST(InterfaceLayout, LayoutSelection_issue_147) { test_with_terminal_size(8, 3, 78, 26, 189); }
+
+TEST(InterfaceLayout, WireViewPowerRailsHeader) {
+  EXPECT_TRUE(test_with_terminal_size(1, 9, 78, 30, 100));
+  EXPECT_TRUE(test_with_terminal_size(2, 10, 78, 45, 180));
+}
+
+TEST(InterfaceOptions, WireViewDisplayValueNames) {
+  enum power_rail_display_value value = power_rail_display_current;
+  EXPECT_STREQ(power_rail_display_value_name(power_rail_display_current), "Current");
+  EXPECT_TRUE(power_rail_display_value_from_name("power", &value));
+  EXPECT_EQ(value, power_rail_display_power);
+  EXPECT_TRUE(power_rail_display_value_from_name("Voltage", &value));
+  EXPECT_EQ(value, power_rail_display_voltage);
+  EXPECT_FALSE(power_rail_display_value_from_name("temperature", &value));
+  EXPECT_FALSE(power_rail_display_value_from_name(nullptr, &value));
+}
+
+TEST(WireViewProtocol, DecodeSixRailSensorFrame) {
+  uint8_t frame[100] = {};
+  make_valid_wireview_frame(frame);
+
+  struct power_rail_snapshot snapshot = {};
+  ASSERT_TRUE(power_rails_decode_wireview_frame(frame, sizeof(frame), &snapshot));
+  EXPECT_TRUE(snapshot.valid);
+  EXPECT_EQ(snapshot.rail_count, 6u);
+  EXPECT_EQ(snapshot.rails[5].voltage_mv, 12005);
+  EXPECT_EQ(snapshot.rails[5].current_ma, 1005u);
+  EXPECT_EQ(snapshot.rails[5].recorded_max_current_ma, 1005u);
+  EXPECT_EQ(snapshot.rails[5].power_uw, 12005000u);
+  EXPECT_EQ(snapshot.total_power_uw, 72015000u);
+  EXPECT_EQ(snapshot.fault_status, 0x20u);
+  EXPECT_EQ(snapshot.temperatures_deci_c[0], 405);
+
+  write_wireview_le32(frame, 12 + 5 * 12 + 4, 900);
+  ASSERT_TRUE(power_rails_decode_wireview_frame(frame, sizeof(frame), &snapshot));
+  EXPECT_EQ(snapshot.rails[5].current_ma, 900u);
+  EXPECT_EQ(snapshot.rails[5].recorded_max_current_ma, 1005u);
+
+  write_wireview_le32(frame, 12 + 5 * 12 + 4, 1100);
+  ASSERT_TRUE(power_rails_decode_wireview_frame(frame, sizeof(frame), &snapshot));
+  EXPECT_EQ(snapshot.rails[5].recorded_max_current_ma, 1100u);
+}
+
+TEST(WireViewProtocol, RejectMalformedSensorFrame) {
+  uint8_t frame[100] = {};
+  frame[11] = 1;
+  struct power_rail_snapshot snapshot = {};
+  EXPECT_FALSE(power_rails_decode_wireview_frame(frame, sizeof(frame), &snapshot));
+  EXPECT_FALSE(power_rails_decode_wireview_frame(frame, sizeof(frame) - 1, &snapshot));
+  EXPECT_FALSE(power_rails_decode_wireview_frame(nullptr, sizeof(frame), &snapshot));
+  EXPECT_FALSE(power_rails_decode_wireview_frame(frame, sizeof(frame), nullptr));
+}
+
+TEST(WireViewProtocol, RejectOutOfRangeSensorValues) {
+  uint8_t frame[100] = {};
+  for (unsigned rail = 0; rail < 6; ++rail) {
+    unsigned offset = 12 + rail * 12;
+    frame[offset] = 0xe0;
+    frame[offset + 1] = 0x2e; // 12000 mV
+  }
+  frame[16] = 0xff;
+  frame[17] = 0xff;
+  frame[18] = 0xff;
+  frame[19] = 0xff; // impossible rail current
+  frame[92] = 0xe0;
+  frame[93] = 0x2e;
+
+  struct power_rail_snapshot snapshot = {};
+  EXPECT_FALSE(power_rails_decode_wireview_frame(frame, sizeof(frame), &snapshot));
+  EXPECT_FALSE(snapshot.valid);
+}
+
+TEST(WireViewProtocol, RejectFrameWithoutChangingRecordedMaximum) {
+  uint8_t frame[100] = {};
+  make_valid_wireview_frame(frame);
+  struct power_rail_snapshot snapshot = {};
+  ASSERT_TRUE(power_rails_decode_wireview_frame(frame, sizeof(frame), &snapshot));
+  ASSERT_EQ(snapshot.rails[0].recorded_max_current_ma, 1000u);
+
+  write_wireview_le32(frame, 12 + 4, 200001);
+  EXPECT_FALSE(power_rails_decode_wireview_frame(frame, sizeof(frame), &snapshot));
+  EXPECT_FALSE(snapshot.valid);
+  EXPECT_EQ(snapshot.rails[0].recorded_max_current_ma, 1000u);
+}
 
 TEST(InterfaceLayout, CheckEmptyProcessWindow) {
   unsigned device_count = 3, header_rows = 3, header_cols = 55, rows = 4, cols = 120;

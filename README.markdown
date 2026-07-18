@@ -1,6 +1,9 @@
 NVTOP
 =====
 
+This branch adds Thermal Grizzly WireView Pro II pin monitoring. Use the short
+[WireView install guide](WIREVIEW.md#build-and-install); the package and upstream clone commands below do not include it.
+
 What is NVTOP?
 --------------
 

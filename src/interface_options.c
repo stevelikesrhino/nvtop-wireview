@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 
 char config_file_path[PATH_MAX];
@@ -129,6 +130,9 @@ void alloc_interface_options_internals(char *config_location, unsigned num_devic
   options->show_startup_messages = true;
   options->filter_nvtop_pid = true;
   options->has_gpu_info_bar = false;
+  options->show_power_rails = false;
+  options->power_rail_display_value = power_rail_display_current;
+  options->power_rails_pdev[0] = '\0';
   options->gpu_plot_color_idx[0] = 1;  // Cyan
   options->gpu_plot_color_idx[1] = 3;  // Yellow
   options->gpu_plot_color_idx[2] = 2;  // Green
@@ -175,6 +179,30 @@ static const char header_section[] = "HeaderOption";
 static const char header_value_use_fahrenheit[] = "UseFahrenheit";
 static const char header_value_encode_decode_timer[] = "EncodeHideTimer";
 static const char header_value_gpu_info_bar[] = "GPUInfoBar";
+static const char header_value_power_rails[] = "PowerRails";
+static const char header_value_power_rail_display_value[] = "PowerRailDisplayValue";
+static const char header_value_power_rails_pdev[] = "PowerRailsPdev";
+
+static const char *power_rail_display_value_names[power_rail_display_value_count] = {
+    "Current", "Power", "Voltage"};
+
+const char *power_rail_display_value_name(enum power_rail_display_value value) {
+  if (value < 0 || value >= power_rail_display_value_count)
+    return power_rail_display_value_names[power_rail_display_current];
+  return power_rail_display_value_names[value];
+}
+
+bool power_rail_display_value_from_name(const char *name, enum power_rail_display_value *value) {
+  if (!name || !value)
+    return false;
+  for (int candidate = 0; candidate < power_rail_display_value_count; ++candidate) {
+    if (strcasecmp(name, power_rail_display_value_names[candidate]) == 0) {
+      *value = (enum power_rail_display_value)candidate;
+      return true;
+    }
+  }
+  return false;
+}
 
 static const char chart_section[] = "ChartOption";
 static const char chart_value_reverse[] = "ReverseChart";
@@ -252,6 +280,20 @@ static int nvtop_option_ini_handler(void *user, const char *section, const char 
       if (strcmp(value, "false") == 0) {
         ini_data->options->has_gpu_info_bar = false;
       }
+    }
+    if (strcmp(name, header_value_power_rails) == 0) {
+      if (strcmp(value, "true") == 0)
+        ini_data->options->show_power_rails = true;
+      if (strcmp(value, "false") == 0)
+        ini_data->options->show_power_rails = false;
+    }
+    if (strcmp(name, header_value_power_rail_display_value) == 0) {
+      enum power_rail_display_value display_value;
+      if (power_rail_display_value_from_name(value, &display_value))
+        ini_data->options->power_rail_display_value = display_value;
+    }
+    if (strcmp(name, header_value_power_rails_pdev) == 0) {
+      snprintf(ini_data->options->power_rails_pdev, sizeof(ini_data->options->power_rails_pdev), "%s", value);
     }
   }
   // Chart Options
@@ -418,6 +460,10 @@ bool save_interface_options_to_config_file(unsigned total_dev_count, const nvtop
   fprintf(config_file, "%s = %s\n", header_value_use_fahrenheit, boolean_string(options->temperature_in_fahrenheit));
   fprintf(config_file, "%s = %e\n", header_value_encode_decode_timer, options->encode_decode_hiding_timer);
   fprintf(config_file, "%s = %s\n", header_value_gpu_info_bar, boolean_string(options->has_gpu_info_bar));
+  fprintf(config_file, "%s = %s\n", header_value_power_rails, boolean_string(options->show_power_rails));
+  fprintf(config_file, "%s = %s\n", header_value_power_rail_display_value,
+          power_rail_display_value_name(options->power_rail_display_value));
+  fprintf(config_file, "%s = %s\n", header_value_power_rails_pdev, options->power_rails_pdev);
 
   // Chart Options
   fprintf(config_file, "\n[%s]\n", chart_section);

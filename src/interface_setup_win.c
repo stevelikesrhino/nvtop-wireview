@@ -58,12 +58,15 @@ enum setup_header_options {
   setup_header_toggle_fahrenheit,
   setup_header_enc_dec_timer,
   setup_header_gpu_info_bar,
+  setup_header_power_rails,
+  setup_header_power_rail_display_value,
   setup_header_options_count
 };
 
 static const char *setup_header_option_descriptions[setup_header_options_count] = {
     "Temperature in fahrenheit", "Keep displaying Encoder/Decoder rate (after reaching an idle state)",
-    "Display extra GPU info bar"};
+    "Display extra GPU info bar", "Display WireView connector power rails",
+    "WireView value beside each current bar"};
 
 // Chart Options
 
@@ -314,6 +317,24 @@ static void draw_setup_window_header(struct nvtop_interface *interface) {
   if (interface->setup_win.indentation_level == 1 &&
       interface->setup_win.options_selected[0] == setup_header_gpu_info_bar) {
     mvwchgat(options_win, setup_header_gpu_info_bar + 1, 0, 3, A_STANDOUT, cyan_color, NULL);
+  }
+
+  // Auxiliary power rails
+  option_state = interface->options.show_power_rails;
+  mvwprintw(options_win, setup_header_power_rails + 1, 0, "[%c] %s", option_state_char(option_state),
+            setup_header_option_descriptions[setup_header_power_rails]);
+  if (interface->setup_win.indentation_level == 1 &&
+      interface->setup_win.options_selected[0] == setup_header_power_rails) {
+    mvwchgat(options_win, setup_header_power_rails + 1, 0, 3, A_STANDOUT, cyan_color, NULL);
+  }
+
+  // Auxiliary power-rail value
+  const char *display_value = power_rail_display_value_name(interface->options.power_rail_display_value);
+  mvwprintw(options_win, setup_header_power_rail_display_value + 1, 0, "[%-7s] %s", display_value,
+            setup_header_option_descriptions[setup_header_power_rail_display_value]);
+  if (interface->setup_win.indentation_level == 1 &&
+      interface->setup_win.options_selected[0] == setup_header_power_rail_display_value) {
+    mvwchgat(options_win, setup_header_power_rail_display_value + 1, 0, 9, A_STANDOUT, cyan_color, NULL);
   }
   wnoutrefresh(options_win);
 }
@@ -817,6 +838,13 @@ void handle_setup_win_keypress(int keyId, struct nvtop_interface *interface) {
           }
           if (interface->setup_win.options_selected[0] == setup_header_gpu_info_bar) {
             interface->options.has_gpu_info_bar = !interface->options.has_gpu_info_bar;
+          }
+          if (interface->setup_win.options_selected[0] == setup_header_power_rails) {
+            interface->options.show_power_rails = !interface->options.show_power_rails;
+          }
+          if (interface->setup_win.options_selected[0] == setup_header_power_rail_display_value) {
+            interface->options.power_rail_display_value =
+                (interface->options.power_rail_display_value + 1) % power_rail_display_value_count;
           }
         }
       }

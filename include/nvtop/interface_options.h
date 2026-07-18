@@ -34,6 +34,13 @@ typedef struct {
   struct gpu_info *linkedGpu; // The gpu to which this option apply
 } nvtop_interface_gpu_opts;
 
+enum power_rail_display_value {
+  power_rail_display_current,
+  power_rail_display_power,
+  power_rail_display_voltage,
+  power_rail_display_value_count,
+};
+
 typedef struct nvtop_interface_option_struct {
   bool
       plot_left_to_right; // true to reverse the plot refresh direction defines inactivity (0 use rate) before hiding it
@@ -51,6 +58,9 @@ typedef struct nvtop_interface_option_struct {
   bool filter_nvtop_pid;                            // Do not show nvtop pid in the processes list
   bool has_monitored_set_changed;                   // True if the set of monitored gpu was modified through the interface
   bool has_gpu_info_bar;                            // Show info bar with additional GPU parameters
+  bool show_power_rails;                            // Show auxiliary power rails below the mapped GPU
+  enum power_rail_display_value power_rail_display_value; // Value printed beside each power-rail bar
+  char power_rails_pdev[PDEV_LEN];                  // PCI device associated with the auxiliary monitor
   bool hide_processes_list;                         // Hide processes list
   unsigned char gpu_plot_color_idx[MAX_LINES_PER_PLOT]; // index into plot_color_names[] per plot slot
 } nvtop_interface_option;
@@ -89,6 +99,9 @@ unsigned interface_check_and_fix_monitored_gpus(unsigned num_devices, struct lis
 bool load_interface_options_from_config_file(unsigned num_devices, nvtop_interface_option *options);
 
 bool save_interface_options_to_config_file(unsigned total_dev_count, const nvtop_interface_option *options);
+
+const char *power_rail_display_value_name(enum power_rail_display_value value);
+bool power_rail_display_value_from_name(const char *name, enum power_rail_display_value *value);
 
 inline bool process_is_field_displayed(enum process_field field, process_field_displayed fields_displayed) {
   return (fields_displayed & (1 << field)) > 0;

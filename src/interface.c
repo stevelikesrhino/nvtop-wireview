@@ -29,6 +29,7 @@
 #include "nvtop/interface_ring_buffer.h"
 #include "nvtop/interface_setup_win.h"
 #include "nvtop/plot.h"
+#include "nvtop/power_rails.h"
 #include "nvtop/time.h"
 
 #include <assert.h>
@@ -56,7 +57,8 @@ static unsigned int sizeof_process_field[process_field_count] = {
 };
 
 static void alloc_device_window(unsigned int start_row, unsigned int start_col, unsigned int totalcol,
-                                struct device_window *dwin) {
+                                bool has_gpu_info_bar, unsigned power_rail_rows, unsigned power_rail_start_col,
+                                unsigned power_rail_cols, struct device_window *dwin) {
 
   const unsigned int spacer = 1;
 
@@ -178,6 +180,14 @@ static void alloc_device_window(unsigned int start_row, unsigned int start_col, 
   if (dwin->exec_engines == NULL)
     goto alloc_error;
 
+  dwin->power_rails = NULL;
+  if (power_rail_rows > 0) {
+    unsigned power_rails_row = start_row + 3 + (has_gpu_info_bar ? 1 : 0);
+    dwin->power_rails = newwin(power_rail_rows, power_rail_cols, power_rails_row, power_rail_start_col);
+    if (dwin->power_rails == NULL)
+      goto alloc_error;
+  }
+
   return;
 alloc_error:
   endwin();
@@ -205,6 +215,8 @@ static void free_device_windows(struct device_window *dwin) {
   delwin(dwin->shader_cores);
   delwin(dwin->l2_cache_size);
   delwin(dwin->exec_engines);
+  if (dwin->power_rails)
+    delwin(dwin->power_rails);
 }
 
 static void alloc_process_with_option(struct nvtop_interface *interface, unsigned posX, unsigned posY, unsigned sizeX,
@@ -355,6 +367,24 @@ static unsigned device_length(void) {
 
 static pid_t nvtop_pid;
 
+static int power_rails_device_index(const struct nvtop_interface *interface) {
+  if (!interface->options.show_power_rails || interface->monitored_dev_count == 0)
+    return -1;
+  if (interface->options.power_rails_pdev[0] == '\0')
+    return 0;
+  for (unsigned index = 0; index < interface->monitored_dev_count; ++index) {
+    const struct gpu_info *gpu = interface->options.gpu_specific_opts[index].linkedGpu;
+    if (gpu && strcmp(gpu->pdev, interface->options.power_rails_pdev) == 0)
+      return (int)index;
+  }
+  return -1;
+}
+
+static unsigned power_rails_row_count(void) {
+  unsigned rail_count = power_rails_get_snapshot()->rail_count;
+  return rail_count > 0 && rail_count <= NVTOP_MAX_POWER_RAILS ? rail_count : 1;
+}
+
 static void initialize_all_windows(struct nvtop_interface *dwin) {
   int rows, cols;
   getmaxyx(stdscr, rows, cols);
@@ -367,7 +397,10 @@ static void initialize_all_windows(struct nvtop_interface *dwin) {
   struct window_position plot_positions[MAX_CHARTS];
   struct window_position setup_position;
 
-  compute_sizes_from_layout(devices_count, dwin->options.has_gpu_info_bar ? 4 : 3, device_length(), rows - 1, cols,
+  int power_device = power_rails_device_index(dwin);
+  unsigned power_rail_rows = power_device >= 0 ? power_rails_row_count() : 0;
+  unsigned device_rows = 3 + (dwin->options.has_gpu_info_bar ? 1 : 0) + power_rail_rows;
+  compute_sizes_from_layout(devices_count, device_rows, device_length(), rows - 1, cols,
                             dwin->options.gpu_specific_opts, dwin->options.process_fields_displayed, device_positions,
                             &dwin->num_plots, plot_positions, map_device_to_plot, &process_position, &setup_position,
                             dwin->options.hide_processes_list);
@@ -375,8 +408,19 @@ static void initialize_all_windows(struct nvtop_interface *dwin) {
   alloc_plot_window(devices_count, plot_positions, map_device_to_plot, dwin);
 
   for (unsigned int i = 0; i < devices_count; ++i) {
+    unsigned power_rail_start_col = 0;
+    unsigned power_rail_cols = cols > 0 ? (unsigned)cols : 1;
+    if ((int)i == power_device && dwin->num_plots > 0) {
+      unsigned plot_id = map_device_to_plot[i];
+      if (plot_id < dwin->num_plots && plot_positions[plot_id].sizeX > 0 &&
+          plot_positions[plot_id].posX < power_rail_cols) {
+        power_rail_start_col = plot_positions[plot_id].posX;
+        power_rail_cols = min(plot_positions[plot_id].sizeX, power_rail_cols - power_rail_start_col);
+      }
+    }
     alloc_device_window(device_positions[i].posY, device_positions[i].posX, device_positions[i].sizeX,
-                        &dwin->devices_win[i]);
+                        dwin->options.has_gpu_info_bar, (int)i == power_device ? power_rail_rows : 0,
+                        power_rail_start_col, power_rail_cols, &dwin->devices_win[i]);
   }
 
   alloc_process_with_option(dwin, process_position.posX, process_position.posY, process_position.sizeX,
@@ -657,6 +701,120 @@ static void encode_decode_show_select(struct device_window *dev, bool encode_val
   }
 }
 
+#define POWER_RAIL_FIXED_BAR_SCALE_MA 10000U
+
+static void draw_power_rails(WINDOW *window, enum power_rail_display_value display_value) {
+  const struct power_rail_snapshot *snapshot = power_rails_get_snapshot();
+  int rows, cols;
+  getmaxyx(window, rows, cols);
+  werase(window);
+  if (rows <= 0 || cols <= 1) {
+    wnoutrefresh(window);
+    return;
+  }
+
+  if (!snapshot->available) {
+    wcolor_set(window, cyan_color, NULL);
+    mvwaddnstr(window, 0, 0, "WIREVIEW", cols - 1);
+    wstandend(window);
+    int remaining = cols - getcurx(window) - 1;
+    if (remaining > 0)
+      waddnstr(window, " not detected (waiting for USB serial device)", remaining);
+    wnoutrefresh(window);
+    return;
+  }
+  if (!snapshot->valid) {
+    wcolor_set(window, cyan_color, NULL);
+    mvwaddnstr(window, 0, 0, "WIREVIEW", cols - 1);
+    wstandend(window);
+    char reconnecting[NVTOP_POWER_RAIL_DEVICE_PATH_LEN + 18];
+    snprintf(reconnecting, sizeof(reconnecting), " reconnecting on %s", snapshot->device_path);
+    int remaining = cols - getcurx(window) - 1;
+    if (remaining > 0)
+      waddnstr(window, reconnecting, remaining);
+    wnoutrefresh(window);
+    return;
+  }
+
+  unsigned rail_count = snapshot->rail_count > NVTOP_MAX_POWER_RAILS ? NVTOP_MAX_POWER_RAILS : snapshot->rail_count;
+  if (rail_count > (unsigned)rows)
+    rail_count = (unsigned)rows;
+  uint32_t max_current_ma = 0;
+  for (unsigned rail = 0; rail < rail_count; ++rail) {
+    if (snapshot->rails[rail].valid && snapshot->rails[rail].current_ma > max_current_ma)
+      max_current_ma = snapshot->rails[rail].current_ma;
+  }
+  uint32_t bar_scale_ma =
+      max_current_ma > POWER_RAIL_FIXED_BAR_SCALE_MA ? max_current_ma : POWER_RAIL_FIXED_BAR_SCALE_MA;
+
+  for (unsigned rail = 0; rail < rail_count; ++rail) {
+    char prefix[32];
+    char max_label[32];
+    bool over_current =
+        snapshot->rails[rail].valid && snapshot->rails[rail].current_ma > POWER_RAIL_FIXED_BAR_SCALE_MA;
+    wcolor_set(window, over_current ? red_color : cyan_color, NULL);
+    mvwprintw(window, (int)rail, 0, "PIN %u", rail + 1);
+    wstandend(window);
+
+    if (rail >= rail_count || !snapshot->rails[rail].valid) {
+      snprintf(prefix, sizeof(prefix), "  %9s   ", "--");
+    } else {
+      double value;
+      char unit;
+      switch (display_value) {
+      case power_rail_display_power:
+        value = snapshot->rails[rail].power_uw / 1000000.0;
+        unit = 'W';
+        break;
+      case power_rail_display_voltage:
+        value = snapshot->rails[rail].voltage_mv / 1000.0;
+        unit = 'V';
+        break;
+      case power_rail_display_current:
+      default:
+        value = snapshot->rails[rail].current_ma / 1000.0;
+        unit = 'A';
+        break;
+      }
+      snprintf(prefix, sizeof(prefix), "  %9.3f %c ", value, unit);
+    }
+    snprintf(max_label, sizeof(max_label), " [Max: %6.2f A]",
+             snapshot->rails[rail].recorded_max_current_ma / 1000.0);
+    if (over_current)
+      wcolor_set(window, red_color, NULL);
+    int prefix_space = cols - getcurx(window) - 1;
+    if (prefix_space <= 0) {
+      wstandend(window);
+      continue;
+    }
+    waddnstr(window, prefix, prefix_space);
+
+    int bar_open_x = getcurx(window);
+    int bar_width = cols - bar_open_x - 2 - (int)strlen(max_label) - 3;
+    if (bar_width <= 0) {
+      wstandend(window);
+      continue;
+    }
+    int filled = 0;
+    if (snapshot->rails[rail].valid) {
+      double usage = round((double)bar_width * snapshot->rails[rail].current_ma / bar_scale_ma);
+      filled = (int)usage;
+    }
+    if (filled > bar_width)
+      filled = bar_width;
+    waddch(window, '[');
+    int bar_y = getcury(window);
+    int bar_x = getcurx(window);
+    whline(window, '|', filled);
+    mvwhline(window, bar_y, bar_x + filled, '-', bar_width - filled);
+    mvwaddch(window, bar_y, bar_x + bar_width, ']');
+    wmove(window, bar_y, bar_x + bar_width + 1);
+    waddstr(window, max_label);
+    wstandend(window);
+  }
+  wnoutrefresh(window);
+}
+
 static void draw_devices(struct list_head *devices, struct nvtop_interface *interface) {
   struct gpu_info *device;
   unsigned dev_id = 0;
@@ -902,6 +1060,9 @@ static void draw_devices(struct list_head *devices, struct nvtop_interface *inte
 
       wnoutrefresh(dev->exec_engines);
     }
+
+    if (dev->power_rails)
+      draw_power_rails(dev->power_rails, interface->options.power_rail_display_value);
 
     dev_id++;
   }
